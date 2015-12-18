@@ -1,6 +1,9 @@
 #!/bin/bash -
 # Title:    nagios_commander.sh
 # Author:   Brandon J. O'Connor <brandoconnor@gmail.com>
+#           Modified (poorly) by Ralph Bean <rbean@redhat.com> to work with
+#           mod_auth_openid authentication for Fedora Infrastructure:
+#           https://admin.fedoraproject.org/
 # Created:  08.19.12
 # Purpose:  Provide a CLI to query and access common nagios functions remotely
 # TODO:     password input from a plain text file
@@ -25,13 +28,13 @@
 
 unalias -a
 # globals can be defined here if desired
-#NAG_HOST=''
-#USERNAME=''
-#PASSWORD=''
-NAG_HTTP_SCHEMA='http'
+NAG_HOST='admin.fedoraproject.org/nagios'
+USERNAME=$BODHI_USER
+PWCOMMAND='pass sys/fas'
+PASSWORD=$($PWCOMMAND)
+NAG_HTTP_SCHEMA='https'
 # seconds to poll nagios till downtime is set
 NAG_POLL_TIMEOUT=45
-USERNAME='<USERNAME>'
 
 function usage {
 if [ -z $NAG_HOST ]; then $NAG_HOST='nagios.env/nagios'; fi
@@ -140,11 +143,10 @@ else
     echo "Script initiated with insufficient inputs. Exiting."; sleep 1; usage
 fi
 
-# verify creds are good on the fastest page possible
+# Login
 NAGIOS_INSTANCE="$NAG_HTTP_SCHEMA://$NAG_HOST/cgi-bin"
-if [ -n "`curl -Ss $NAGIOS_INSTANCE/ -u $USERNAME:$PASSWORD | grep 'Authorization'`" ]; then
-    echo "Bad credentials. Exiting"; exit 1
-fi
+COOKIE_COMMAND="./nagios-openid-login.py $NAG_HTTP_SCHEMA://$NAG_HOST $USERNAME"
+COOKIES=$($COOKIE_COMMAND)
 
 function MAIN {
 if  [ $QUERY ]; then
@@ -342,14 +344,14 @@ exit
 
 function FIND_DOWN_ID {
 if [[ $SCOPE = hosts ]]; then
-    DOWN_ID=$(curl -Ss $NAGIOS_INSTANCE/extinfo.cgi -u $USERNAME:$PASSWORD \
+    DOWN_ID=$(curl -Ss $NAGIOS_INSTANCE/extinfo.cgi ${COOKIES} \
     --data type=6 | grep "extinfo.cgi" | sed -e'/service=/d' |\
     awk -F"<td CLASS='downtime" '{print $2" "$4" "$7" "$10" "$5}' |\
     awk -F'>' '{print $3"|||"$10}' | sed -e's/<\/td//g' -e's/<\/A//g' |\
     egrep "$HOST" | egrep -o "[0-9]+" | sort -rn | head -n1)
     if [ ! $DOWN_ID ]; then DOWN_ID=1; fi
 elif [[ $SCOPE = services ]]; then
-    DOWN_ID=$(curl -Ss $NAGIOS_INSTANCE/extinfo.cgi -u $USERNAME:$PASSWORD \
+    DOWN_ID=$(curl -Ss $NAGIOS_INSTANCE/extinfo.cgi ${COOKIES} \
     --data type=6 | grep "extinfo.cgi" | grep "service=" |\
     awk -F"<td CLASS='downtime" '{print $2" "$3" "$5" "$7" "$8" "$6" "$11}' |\
     awk -F'>' '{print $3"|||"$7"|||"$18}' | sed -e's/<\/td//g' -e's/<\/A//g' |\
@@ -362,7 +364,7 @@ fi
 
 function DOWNTIME_QUERY {
 if [[ $SCOPE = hosts ]]; then
-    curl -Ss $NAGIOS_INSTANCE/extinfo.cgi --data type=6 -u $USERNAME:$PASSWORD |\
+    curl -Ss $NAGIOS_INSTANCE/extinfo.cgi --data type=6 ${COOKIES} |\
     grep "extinfo.cgi" | sed -e'/service=/d' |\
     awk -F"<td CLASS='downtime" '{print $2" "$4" "$7" "$10" "$5}' |\
     awk -F'>' '{print $3"|||"$10"|||"$8"|||"$6"|||"$12}' |\
@@ -370,7 +372,7 @@ if [[ $SCOPE = hosts ]]; then
     sed "1 i \Hostname|||Downtime-id|||End_date_and_time|||Author|||Comment" |\
     column -c7 -t -s"|||"
 elif [[ $SCOPE = services ]]; then
-    curl -Ss $NAGIOS_INSTANCE/extinfo.cgi --data type=6 -u $USERNAME:$PASSWORD |\
+    curl -Ss $NAGIOS_INSTANCE/extinfo.cgi --data type=6 ${COOKIES} |\
     grep "extinfo.cgi" | grep "service=" |\
     awk -F"<td CLASS='downtime" '{print $2" "$3" "$5" "$7" "$8" "$6" "$11}' |\
     awk -F'>' '{print $3"|||"$7"|||"$18"|||"$14"|||"$10"|||"$16}' |\
@@ -387,7 +389,7 @@ curl -Ss --output /dev/null $NAGIOS_INSTANCE/cmd.cgi \
     --data cmd_typ=$CMD_TYP \
     --data down_id=$DOWN_ID \
     --data btnSubmit=Commit \
-    -u $USERNAME:$PASSWORD
+    ${COOKIES}
 if [ $? -eq 1 ]; then echo "curl failed"; exit 1; fi
 }
 
@@ -397,7 +399,7 @@ curl -sS $DATA \
     --data cmd_mod=2 \
     --data cmd_typ=$CMD_TYP \
     --data btnSubmit=Commit \
-    -u $USERNAME:$PASSWORD |\
+    ${COOKIES} | \
     grep -o 'Your command request was successfully submitted to Nagios for processing.'
 if [ $? -eq 1 ]; then echo "curl failed. Command not sent."; exit 1; fi
 QUERY=$SCOPE; RESULT=`MAIN`
@@ -409,7 +411,7 @@ exit 0
 function GLOBAL_QUERY {
 HTML=`curl  -sS $NAGIOS_INSTANCE/extinfo.cgi \
     --data type=0 \
-    -u $USERNAME:$PASSWORD | grep "$SEARCH"`
+    ${COOKIES} | grep "$SEARCH"`
 if [ $? -eq 1 ]; then echo "curl failed"; exit 1; fi
 MATCH=`echo $HTML | grep -i 'yes'`
 if [ -n "$MATCH" ]; then echo "$QUERY:enabled"; exit
@@ -423,7 +425,7 @@ curl -sS  $DATA \
     --data "com_data=$COMMENT" \
     --data cmd_mod=2 \
     --data btnSubmit=Commit \
-    -u $USERNAME:$PASSWORD |\
+    ${COOKIES} |\
     grep -o 'Your command request was successfully submitted to Nagios for processing.'
 if [ $? -eq 1 ]; then echo "curl failed. Command not sent."; exit 1; fi
 exi
@@ -440,7 +442,7 @@ curl -sS  $DATA \
     --data cmd_mod=2 \  # is this necessary?
     --data btnSubmit=Commit \
     --data "force_recheck"
-    -u $USERNAME:$PASSWORD |\
+    ${COOKIES} |\
     grep -o 'Your command request was successfully submitted to Nagios for processing.'
 if [ $? -eq 1 ]; then echo "curl failed. Command not sent."; exit 1; fi
 exit 0
@@ -454,7 +456,7 @@ curl -sS  $DATA \
     --data "com_data=$COMMENT" \
     --data cmd_mod=2 \
     --data btnSubmit=Commit \
-    -u $USERNAME:$PASSWORD |\
+    ${COOKIES} |\
     grep -o 'Your command request was successfully submitted to Nagios for processing.'
 if [ $? -eq 1 ]; then echo "curl failed. Command not sent."; exit 1; fi
 exit
@@ -462,7 +464,7 @@ exit
 
 function LIST_HOSTS {
 echo -e "Hostname\tStatus"
-curl -Ss $DATA $NAGIOS_INSTANCE/status.cgi -u $USERNAME:$PASSWORD |\
+curl -Ss $DATA $NAGIOS_INSTANCE/status.cgi ${COOKIES} |\
     grep 'extinfo.cgi?type=1&host=' | grep "statusHOST" | awk -F'</A>' '{print $1}' |\
     awk -F'statusHOST' '{print $2}'  |  awk -F"'>" '{print $3"\t"$1}' | sed 's/<\/a>&nbsp;<\/td>//g' | column -c2 -t
 exit
@@ -471,7 +473,7 @@ exit
 function LIST_GROUPS {
 echo "List of all $TYPE\groups"
 echo "---"
-curl -Ss $DATA $NAGIOS_INSTANCE/status.cgi -u $USERNAME:$PASSWORD |\
+curl -Ss $DATA $NAGIOS_INSTANCE/status.cgi ${COOKIES} |\
     egrep "status(Even|Odd)" | grep "status.cgi?$TYPE\group=" | awk -F'</A>' '{print $1}' |\
     awk -F"${TYPE}group=" '{print $2}' | awk -F'&' '{print $1}' | column -c2 -t
 exit
@@ -480,9 +482,9 @@ exit
 function LIST_SERVICES {
 echo Fetching services and health on $HOST
 echo ---
-HOSTS=($(curl -Ss $DATA $NAGIOS_INSTANCE/status.cgi -u $USERNAME:$PASSWORD |\
+HOSTS=($(curl -Ss $DATA $NAGIOS_INSTANCE/status.cgi ${COOKIES} |\
     grep "extinfo.cgi?type=2&host=" | cut -d"=" -f8 | cut -d"'" -f1))
-STATUSES=($(curl -Ss $DATA $NAGIOS_INSTANCE/status.cgi -u $USERNAME:$PASSWORD |\
+STATUSES=($(curl -Ss $DATA $NAGIOS_INSTANCE/status.cgi ${COOKIES} |\
     egrep "status(OK|CRITICAL|WARNING|UNKNOWN)" | cut -d"'" -f2 | cut -c 7-))
 for i in $(seq 0 $(( ${#HOSTS[@]} - 1 )) ); do
     COMBINED=(${COMBINED[@]} ${HOSTS[$i]}@${STATUSES[$i]})
